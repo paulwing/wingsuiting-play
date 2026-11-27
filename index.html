@@ -302,14 +302,18 @@ let reducedMotion=motionPreference.matches;
 motionPreference.addEventListener('change',event=>{reducedMotion=event.matches});
 const poly=(g,points,color)=>{g.fillStyle=color;g.beginPath();points.forEach(([x,y],i)=>i?g.lineTo(x,y):g.moveTo(x,y));g.closePath();g.fill()};
 function line(g,x1,y1,x2,y2,color,w=1){g.strokeStyle=color;g.lineWidth=w;g.beginPath();g.moveTo(x1,y1);g.lineTo(x2,y2);g.stroke()}
-// Fade unresolved harmonics into lower octaves before they alias into a slow beat.
-function windWave(t,rate,phase,frameSeconds){
- const radiansPerCycle=2*Math.PI;
- while(rate*frameSeconds>.48*radiansPerCycle)rate*=.5;
- const blend=ease(.38,.48,rate*frameSeconds/radiansPerCycle);
- return mix(Math.sin(t*rate+phase),Math.sin(t*rate*.5+phase),blend);
+let windFlight,windTime=0,windPhase=0;
+function advanceWindPhase(flight,time){
+ if(flight!==windFlight){windFlight=flight;windTime=0;windPhase=0}
+ const dt=Math.max(0,time-windTime);windTime+=dt;
+ const airspeed=clamp((flight.speed-32)/(108-32),0,1);
+ // Integrate cycles so a speed change never jumps the helmet to a different phase.
+ // At low frame rates even the fastest fabric harmonic stays below half a cycle per frame.
+ const slowCycles=Math.min(4*dt,.10),fastCycles=Math.min(17*dt,.25);
+ windPhase+=2*Math.PI*mix(slowCycles,fastCycles,airspeed);
+ return windPhase;
 }
-function helmetMotion(s,frameSeconds=1/60){
+function helmetMotion(s,phase){
  if(reducedMotion||s.t===0||s.opened&&s.chuteT>=1.9){
   return {pitch:0,yaw:0,roll:0,heave:0,slip:0,flutter:0,tug:0};
  }
@@ -317,10 +321,10 @@ function helmetMotion(s,frameSeconds=1/60){
  const wind=.16*ease(0,.36,t)*(s.opened?1-ease(0,.65,canopy):1);
  const load=.57+.76*ease(glideSpeed,diveSpeed,s.speed)+.35*ease(.29,.58,s.gamma)+.20*Math.abs(s.bank);
  // Gusts vary the pressure slowly; the helmet and fabric respond with a fine tremor.
- const swell=windWave(t,52,.55*Math.sin(t*2.1),frameSeconds);
- const cross=windWave(t,73,.65*Math.sin(t*3.1)+.4,frameSeconds);
- const ripple=.58*windWave(t,233,.36*Math.sin(t*2.7),frameSeconds)
-             +.28*windWave(t,371,.8,frameSeconds)+.14*windWave(t,484,0,frameSeconds);
+ const swell=Math.sin(phase+.55*Math.sin(t*2.1));
+ const cross=Math.sin(1.40*phase+.65*Math.sin(t*3.1)+.4);
+ const ripple=.58*Math.sin(1.78*phase+.36*Math.sin(t*2.7))
+             +.28*Math.sin(1.47*phase+.8)+.14*Math.sin(1.90*phase);
  const wake=wind*s.rush*(.71+.29*Math.sin(t*10.6+Math.sin(t*4.3)));
  const air=wind*load;
  // Line stretch gives one damped head bob as the canopy takes the load.
@@ -332,8 +336,8 @@ function helmetMotion(s,frameSeconds=1/60){
  return {pitch,yaw,roll,heave:.029*air*swell+.035*wake*ripple+.75*tug,
   slip:.024*air*cross+.029*wake*cross,flutter:(air+.72*wake)*ripple,tug};
 }
-function flightCamera(s,frameSeconds=1/60){
- const motion=helmetMotion(s,frameSeconds),glidePitch=-s.gamma*.83-.042;
+function flightCamera(s,phase){
+ const motion=helmetMotion(s,phase),glidePitch=-s.gamma*.83-.042;
  const yaw=s.yaw+motion.yaw,pitch=mix(glidePitch,-.39,s.opened?ease(0,.75,s.chuteT):0)+motion.pitch;
  const bank=s.bank*(reducedMotion?.33:.80)+motion.roll;
  const cy=Math.cos(yaw),sy=Math.sin(yaw),cp=Math.cos(pitch),sp=Math.sin(pitch),cb=Math.cos(bank),sb=Math.sin(bank);
@@ -567,13 +571,10 @@ function suit(side,motion){
  if(!side){g.fillStyle='#242a29';g.beginPath();g.arc(0,9,7,0,7);g.fill();g.strokeStyle='#9c9c8e';g.stroke();line(g,0,9,3,5,'#f1b37c',1.2)}
  g.restore();ctx.restore();
 }
-let windFrameSeconds=1/60;
-function drawWorld(elapsed=1/60){
- if(mode!=='playing')windFrameSeconds=1/60;
- else if(elapsed>0&&elapsed<.15)windFrameSeconds=mix(windFrameSeconds,elapsed,1-Math.exp(-elapsed*6));
+function drawWorld(){
  // Use the remainder of the fixed physics step for a smooth render-time phase.
  const pose=mode==='playing'?{...sim,t:sim.t+accumulator}:sim;
- const c=flightCamera(pose,windFrameSeconds);ctx.clearRect(0,0,W,H);
+ const c=flightCamera(pose,advanceWindPhase(sim,pose.t));ctx.clearRect(0,0,W,H);
  if(terrainRenderer)terrainRenderer.draw(c);else{
   if(!stonePixels&&images.stone){const q=document.createElement('canvas');q.width=q.height=256;const g=q.getContext('2d');g.drawImage(images.stone,0,0,256,256);stonePixels=g.getImageData(0,0,256,256).data}
   cpuView(c);
@@ -877,7 +878,7 @@ function tick(ts){
   else if(mode==='ending'&&visualTime>=resultAt)finish();
  }
  const interval=mode==='playing'||mode==='ending'?1000/60:1000/15;
- if((!overlay||lastDraw<0)&&ts-lastDraw>=interval-1){const elapsed=(ts-lastDraw)/1000;lastDraw=ts;drawWorld(elapsed);if(sim.phase==='overrun')updateRadio()}
+ if((!overlay||lastDraw<0)&&ts-lastDraw>=interval-1){lastDraw=ts;drawWorld();if(sim.phase==='overrun')updateRadio()}
  if(ts-lastHud>90){lastHud=ts;showHUD()}
  requestAnimationFrame(tick);
 }
